@@ -1,0 +1,324 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>文件上传大全</title>
+    <style>
+        .center{
+            text-align: center;
+        }
+        .preTitle { margin-top: 60px; }
+        .previewImg {
+            width: 400px;
+            height: 300px;
+            margin: 10px;
+        }
+        .dragArea {
+            width: 90%;
+            height: 400px;
+            margin-left: 100px;
+            border-radius: 20px;
+            border: 1px dashed #abcdef;
+            text-align: center;
+            line-height: 400px;
+            font-size: 30px;
+            color: #abcdef;
+        }
+        #uploadBtn1{
+            display: none;
+        }
+        .pauseBtn {
+            margin-left: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h3 class='center preTitle'>预览区域</h3>
+    <div id="previewContainer" class='center'>
+
+        <button onClick="uploadHandle()" id="uploadBtn1" class='center'>上传</button>
+        
+    </div>
+    <h3 class='center'>1. 多文件异步上传</h3>
+    <div class='center'>
+        <input type='file' id="uploadElem" multiple name="myUpload" onChange="fileInputHandleChange()" />
+    </div>
+    <h3 class='center'>2. 多文件拖拽预览，上传</h3>
+    <div class="dragArea center" id="dragArea">
+        请将文件拖到虚线框里
+    </div>
+    <h3 class='center'>3. 大文件切片上传</h3>
+    <div class='center'>
+        <input type='file' id="uploadLarge" name="myUpload" onChange="largeFileHandleChange(this)" />
+        <button class="pauseBtn" id="pauseBtn">暂停</button>
+    </div>
+
+    <script src="https://cdn.bootcdn.net/ajax/libs/spark-md5/3.0.0/spark-md5.js"></script>
+    <script>
+        // 文件选择器触发函数
+        let uploadFiles = []
+        function fileInputHandleChange() {
+            const files = getFileContent()
+            uploadFiles = files;
+            previewFiles(files);
+            uploadBtn1.style.display = "inline-block"
+        }
+        // 获取上传文件内容
+        function getFileContent(){
+            let localFileElem = document.getElementById("uploadElem");
+            const files = localFileElem.files;
+            localFileElem = null;
+            return files;
+        }
+        // 预览文件
+        function previewFiles(files) {
+            let previewContainer = document.getElementById('previewContainer')
+            Array.from(files).forEach(file => {
+                let previewContent;
+                let fileReader = new FileReader();
+                fileReader.onload = (e) => {
+                    let img = new Image()
+                    img.src = e.target.result;
+                    img.className = "previewImg center"
+                    previewContainer.appendChild(img)
+                }
+                fileReader.readAsDataURL(file, "UTF-8");
+            })
+        }
+        function simpleSendData(formData){
+            let xhr = new XMLHttpRequest();
+            xhr.onreadystatechange = () => {
+                if ( xhr.readyState == 4 && xhr.status == 200 ) {
+                    console.log( xhr.responseText );
+                }
+            };
+            xhr.timeout = 100000;
+            xhr.ontimeout = () => {
+                alert('请求超时！');
+            }
+            xhr.open('POST', 'http://127.0.0.1:8080/multiUpload');
+            xhr.send(formData);
+        }
+        function uploadHandle(){
+            var formData = new FormData();
+            for(let i = 0;i < uploadFiles.length;i++){  
+                formData.append(i, files[i])
+            } 
+            simpleSendData(formData)
+        }
+
+        // 拖拽上传
+        document.addEventListener('drop', function(e){
+            e.preventDefault();
+        }, false)
+        document.addEventListener('dragover', function(e){
+            e.preventDefault();
+        }, false)
+
+        let dragArea = document.getElementById("dragArea")
+        dragArea.ondrop = function(e) {
+            previewFiles(e.dataTransfer.files);
+            uploadFiles = e.dataTransfer.files;
+            e.target.innerHTML = '请将文件拖拽到此区域';
+            uploadBtn1.style.display = "block"
+        }
+        dragArea.ondragenter = function(){
+            dragArea.innerHTML = '请释放鼠标';
+        };
+        dragArea.ondragover = function(){
+           return false;
+         };
+        dragArea.ondragleave = function(){
+            dragArea.innerHTML = '请将文件拖拽到此区域';
+        };
+
+        var globalFile = null
+        // 大文件断点续传
+        async function largeFileHandleChange(target) {
+            let file;
+            if (!globalFile) {
+                // 第一次上传
+                file = target.files[0]
+                globalFile = file
+            } else {
+                // 续传
+                
+                file = globalFile
+                console.log('续传执行开始')
+            }
+            let md5 = await getMd5ContentHash(file)
+            // 先做预请求，看文件有没有上传过，上传过多少分片，接下来从哪个分片继续上传
+            let res = await preUploadRequest(md5, file.name)
+            console.log('preResponse', res)
+            if (res && res.code == "200003") {
+                // 没上传过，是第一次上传
+                uploadChunk(file, md5)
+            } 
+            else if (res && res.code == "200001") {
+                // 完整上传过，不用上传了
+                alert('上传过了,秒传了')
+            }
+            else if (res && res.code == "200002") {
+                // 得到继续上传的分片索引，继续上传
+                uploadChunk(file, md5, res.data)
+            }
+            
+        }
+
+        function sendData(formData ){
+            return new Promise((resolve, reject) => {
+                if (isPause) {
+                    reject('暂停了')
+                    return 
+                }
+                let xhr = new XMLHttpRequest();
+                xhr.onreadystatechange = () => {
+                    if ( xhr.readyState == 4 && xhr.status == 200 ) {
+                        resolve( xhr.responseText );
+                    }
+                };
+                xhr.onerror = (err) => {
+                    reject(err)
+                }
+                xhr.timeout = 100000;
+                xhr.ontimeout = () => {
+                    alert('请求超时！');
+                }
+
+                xhr.open('POST', 'http://127.0.0.1:8080/chunkUpload');
+                xhr.send(formData);
+            })
+        }
+
+        // 像后端发送合并chunk文件请求, 告诉后端对哪个文件进行合并，将内容hash给后端，以便进行完整性校验
+        function sendMergeRequest(file, contentHash){
+            return new Promise((resolve, reject) => {
+                // xhr太反锁了，还是用fetch吧
+                fetch('http://127.0.0.1:8080/mergeRequest', {
+                    method: 'POST',
+                    body: JSON.stringify({ filename: file.name, contentHash }),
+                    headers: new Headers({
+                        'Content-Type': 'application/json'
+                    })
+                })
+                .then(res => resolve(res))
+                .catch(err => reject(err))
+            })            
+        }
+        // 上传分片
+        function uploadChunk(file, contentHash, i = 0, defaultChunkSize = 50 ) {
+            let filename = file.name;                   // 分片到校
+            let chunks = Math.ceil(file.size / defaultChunkSize)    // 分片数量
+            // 根据索引获取分片formData
+            function getChunkFormData(index, chunkSize){
+                let start = index * chunkSize;
+                let end = (i + 1) * chunkSize >= file.size ? file.size : (i + 1) * chunkSize
+                let formData = new FormData();
+                formData.append("total", chunks) //总片数
+                formData.append("index", i) //当前是第几片   
+                formData.append('myfile', new File([file.slice(start, end)], index))
+                formData.append("contentHash", contentHash)
+                formData.append("fileFullname", filename)
+                return formData
+            }
+        
+            const formDataArr = []
+            while(true){
+                if (i * defaultChunkSize <= file.size) {
+                    formDataArr.push(getChunkFormData(i, defaultChunkSize))
+                    i++
+                } else {
+                    break
+                }
+            }
+
+            requestUnderMax(formDataArr, sendData, 6).then(() => {
+                console.log('全都分片都上传完了， 可以进行合并了')
+                sendMergeRequest(file, contentHash)
+                .then(res => res.json())
+                .then(res => {
+                    console.log('合并完成', res)
+                })
+            })
+
+        }
+
+        // 生成内容hash
+        function getMd5ContentHash(file) {
+            return new Promise((resolve, reject) => {
+                let fileReader = new FileReader();
+                let spark = new SparkMD5.ArrayBuffer()
+                fileReader.onload = function (e) {
+                    spark.append(e.target.result);
+                    let result = spark.end()
+                    resolve(result)
+                };
+                fileReader.readAsArrayBuffer(file);
+            })
+        }
+
+        // 模拟续传
+        var isPause = false;
+        pauseBtn.addEventListener('click', (e) => {
+            if (!isPause) {
+                isPause = true;
+                e.target.innerText = "继续"
+            } else {
+                // 点击了继续的操作，准备续传
+                isPause = false;
+                e.target.innerText = "暂停"
+                largeFileHandleChange()
+            }
+        })
+
+        // 在续传之前询问后端，有没有上传完？有没有上传过？上次上传到什么位置了
+        function preUploadRequest(contentHash, filename) {
+            let paramStr = `contentHash=${contentHash}&filename=${encodeURIComponent(filename)}`
+            return fetch(`http://127.0.0.1:8080/getRequestStatus?${paramStr}`, {
+                method: 'GET'
+            }).then(res => res.json())     
+        }
+
+
+        // 用于控制请求的并发数，避免浏览器坏崩
+        function requestUnderMax(formDatas, requestFn, max) {
+            return new Promise((resolve, reject) => {
+                let i = 0;
+                let isRejected = false
+                let queue = [];
+                let resArr = Array(formDatas.length);
+                let error = false;
+                function loop(formDatas) {
+                    if (error) return;
+                    if (formDatas.length === 0 ) {
+                        Promise.all(queue).then(() => {
+                            resolve(resArr);
+                        })
+                        return
+                    }
+                    if (queue.length < max && !error) {
+                        let p = requestFn(formDatas.shift())
+                        .then(res => {
+                            resArr[p.index] = res;
+                            if (formDatas.length > 0) {
+                                queue.splice(queue.indexOf(p), 1)
+                                loop(formDatas)
+                            }
+                        })
+                        .catch((err) => {
+                            error = true
+                            reject(err)
+                        })
+                        p.index = i;
+                        i++;
+                        queue.push(p)
+                        return loop(formDatas)
+                    }
+                    return
+                }
+                loop([...formDatas]);
+            })
+        }        
+    </script>
+</body>
+</html>
